@@ -1,0 +1,60 @@
+# 🔐 Environment variables
+.env
+.env.*
+*.env
+
+# 🐍 Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 🧠 Django stuff
+*.log
+local_settings.py
+db.sqlite3
+
+# 🚫 Migrations (ignore ALL migrations except __init__.py)
+**/migrations/*
+!**/migrations/__init__.py
+
+# 📦 Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# 🧪 Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 📂 Static & media (optional)
+media/
+staticfiles/
+
+# 🧾 IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 🖥 OS files
+.DS_Store
+Thumbs.db
+
+# 📦 Build / dist
+build/
+dist/
+*.egg-info/
+
+# 🔑 Secret / key files
+*.pem
+*.key
+
+# 🔄 Cache folders
+.cache/
+*.cache
+
+
+clerk_jwt_helper.py
+helper
