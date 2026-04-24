@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timedelta
 from django.conf import settings
-from .tasks import run_parallel, score, build_provider_tasks
+from .tasks import *
 
 
 def build_discovery(payload):
@@ -25,26 +25,32 @@ def build_discovery(payload):
     lng=lng,
     radius_km=radius_km,
 )
-#Calls each provider's API in parallel (not sequential — we want speed)
+    #Calls each provider's API in parallel (not sequential — we want speed)
     results = run_parallel(tasks)
 
 
     businesses = [b for group in results for b in group]
 
 # Deduplicates across providers (same place showing up on Yelp and Tripadvisor = keep one)
-    seen = set()
-    unique = []
+    deduped = {}
 
-    for b in businesses:
-        key = b["name"]
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(b)
+    for business in businesses:
+        key = joining_name_address(business)
 
-#Re-ranks by: proximity (40%) + time fit (35%) + category match (25%)
+        if key not in deduped:
+            deduped[key] = business
+        else:
+            if business.get("rating", 0) > deduped[key].get("rating", 0):
+                deduped[key] = business
+
+    unique = list(deduped.values())
+
+
+
+    #Re-ranks by: proximity (40%) + time fit (35%) + category match (25%)
     ranked = sorted(unique, key=score, reverse=True)
-#Takes the top 5
+
+    #Takes the top 5
     top = ranked[:settings.DISCOVERY_MAX_SUGGESTIONS]
 
     suggestions = []
@@ -54,12 +60,12 @@ def build_discovery(payload):
             continue
 
         suggestions.append({
-            "provider": "Yelp",
-            "external_id": f"yelp_{b['id']}",
+            "provider": b.get("provider"),
+            "external_id": f"{b.get('provider')}_{b['id']}",
             "title": b.get("name"),
             "category":b.get("categories"),
             "rating": b.get("rating"),
-            "address" : b.get("location", {}).get("display_address", []),
+            "price_range":b.get("price"),
             "distance_m": int(b.get("distance", 0)),
             "image_url": b.get("image_url"),
             "url": b.get("url"),
@@ -69,7 +75,7 @@ def build_discovery(payload):
         return []
 
 
-    now = datetime.utcnow()
+    now = datetime.now()
     expires = now + timedelta(
         hours=settings.DISCOVERY_POST_EXPIRY_HOURS
     )

@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor
-import time
 import requests
 from django.conf import settings
 from .constants import PROVIDER_MAP
@@ -8,8 +7,13 @@ from django.core.cache import cache
 
 
 def run_parallel(tasks):
+    def safe_call(f):
+        try:
+            return f()
+        except Exception:
+            return []
     with ThreadPoolExecutor() as executor:
-        return list(executor.map(lambda f: f(), tasks))
+        return list(executor.map(safe_call, tasks))
 
 def get_geohash(lat, lng):
     return geohash2.encode(lat, lng, precision=6)
@@ -19,25 +23,21 @@ def score(b):
     distance = b.get("distance", 0)
     rating = b.get("rating", 0)
 
-    proximity_score = (100 - (distance / 100))
+    proximity_score = max(0,100 - (distance / 100))
     rating_score = rating * 20
     category_score = 100
+    final_score= (proximity_score * 0.40) +(rating_score * 0.35) +(category_score * 0.25)
 
-    return (
-        proximity_score * 0.40 +
-        rating_score * 0.35 +
-        category_score * 0.25
-    )
+    return final_score
 
 def get_providers(category: str):
     return PROVIDER_MAP.get(category, PROVIDER_MAP["generic"])
 
 
 def fetch_yelp(lat, lng, radius_km, term="restaurants"):
+
     geohash = geohash2.encode(lat, lng, precision=6)
-
-    cache_key = f"disc:provider:cache:yelp:{geohash}:{term}"
-
+    cache_key = f"disc:provider:cache:yelp:{geohash}:{term}:{radius_km}"
     cached = cache.get(cache_key)
 
     if cached is not None:
@@ -65,6 +65,9 @@ def fetch_yelp(lat, lng, radius_km, term="restaurants"):
         return []
 
     data = res.json().get("businesses", [])
+
+    for b in data:
+        b["provider"] = "yelp"
 
     cache.set(
         cache_key,
@@ -94,8 +97,8 @@ def fetch_luma(lat, lng, radius_km):
     print("fetching luma")
     return []
 
-def fetch_partyful(lat, lng, radius_km):
-    print("fetching partyful")
+def fetch_partiful(lat, lng, radius_km):
+    print("fetching partiful")
     return []
 
 def fetch_kayak(lat, lng, radius_km):
@@ -126,10 +129,16 @@ def build_provider_tasks(category, lat, lng, radius_km):
         tasks.append(lambda: fetch_luma(lat, lng, radius_km))
 
     if "partiful" in providers:
-        tasks.append(lambda: fetch_partyful(lat, lng, radius_km))
+        tasks.append(lambda: fetch_partiful(lat, lng, radius_km))
 
     if "kayak" in providers:
         tasks.append(lambda: fetch_kayak(lat, lng, radius_km))
 
     return tasks
 
+def joining_name_address(b):
+    name = b.get("name", "").lower().strip()
+    address_list = b.get("location", {}).get("display_address", [])
+    address = " ".join(address_list).lower().strip()
+
+    return name + "|" + address
