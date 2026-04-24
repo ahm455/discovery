@@ -1,3 +1,5 @@
+import uuid
+from datetime import timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor
 import requests
 from django.conf import settings
@@ -36,31 +38,21 @@ def get_providers(category: str):
 
 def fetch_yelp(lat, lng, radius_km, term="restaurants"):
 
-    geohash = geohash2.encode(lat, lng, precision=6)
+    geohash = get_geohash(lat, lng)
     cache_key = f"disc:provider:cache:yelp:{geohash}:{term}:{radius_km}"
     cached = cache.get(cache_key)
 
     if cached is not None:
         return cached
 
-    headers = {
-        "Authorization": f"Bearer {settings.YELP_API_KEY}"
-    }
+    headers = {"Authorization": f"Bearer {settings.YELP_API_KEY}"}
 
-    params = {
-        "latitude": lat,
-        "longitude": lng,
-        "radius": int(radius_km * 1000),
-        "term": term,
-    }
+    params = {"latitude": lat,"longitude": lng,"radius": int(radius_km * 1000),"term": term,}
+
     YELP_URL = "https://api.yelp.com/v3/businesses/search"
 
-    res = requests.get(
-        YELP_URL,
-        headers=headers,
-        params=params,
-        timeout=5
-    )
+    res = requests.get(YELP_URL,headers=headers,params=params,timeout=5)
+
     if res.status_code != 200:
         return []
 
@@ -69,11 +61,7 @@ def fetch_yelp(lat, lng, radius_km, term="restaurants"):
     for b in data:
         b["provider"] = "yelp"
 
-    cache.set(
-        cache_key,
-        data,
-        timeout=settings.DISCOVERY_PROVIDER_CACHE_TTL_SECONDS
-    )
+    cache.set(cache_key,data,timeout=settings.DISCOVERY_PROVIDER_CACHE_TTL_SECONDS)
 
     return data
 
@@ -99,7 +87,7 @@ def fetch_luma(lat, lng, radius_km):
 
 def fetch_partiful(lat, lng, radius_km):
     print("fetching partiful")
-    return []
+    return [] #no api available
 
 def fetch_kayak(lat, lng, radius_km):
     print("fetching kayak")
@@ -136,8 +124,69 @@ def build_provider_tasks(category, lat, lng, radius_km):
 
     return tasks
 
+def build_post(lat, lng, label, top):
+
+    suggestions = []
+
+    for b in top:
+        if not b.get("image_url"):
+            continue
+
+        suggestions.append({
+            "provider": b.get("provider"),
+            "external_id": f"{b.get('provider')}_{b['id']}",
+            "title": b.get("name"),
+            "category": b.get("categories"),
+            "rating": b.get("rating"),
+            "price_range": b.get("price"),
+            "distance_m": int(b.get("distance", 0)),
+            "image_url": b.get("image_url"),
+            "url": b.get("url"),
+        })
+
+    if not suggestions:
+        return []
+    now = datetime.now()
+
+    return [{
+        "id": f"disc_{uuid.uuid4()}",
+        "type": "discovery",
+        "created_at": now,
+        "author": "system_user_musey",
+        "location": {
+            "lat": lat,
+            "lng": lng,
+            "label": label
+        },
+        "headline": "Some great spots near you right now 📍",
+        "image_url": suggestions[0]["image_url"],
+        "suggestions": suggestions,
+        "expires_at": (now + timedelta(hours=settings.DISCOVERY_POST_EXPIRY_HOURS)).isoformat()
+    }]
+
+def deduplicate_businesses(businesses):
+    deduped = {}
+
+    for b in businesses:
+        if not b.get("name"):
+            continue
+
+        key = joining_name_address(b)
+
+        if key not in deduped:
+            deduped[key] = b
+        else:
+            if b.get("rating", 0) > deduped[key].get("rating", 0):
+                deduped[key] = b
+
+    return list(deduped.values())
+
 def joining_name_address(b):
     name = b.get("name", "").lower().strip()
+
+    for word in ["restaurant", "cafe", "branch"]:
+        name = name.replace(word, "")
+
     address_list = b.get("location", {}).get("display_address", [])
     address = " ".join(address_list).lower().strip()
 
