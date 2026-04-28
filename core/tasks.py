@@ -33,9 +33,143 @@ def fetch_yelp(lat, lng, radius_km, term="restaurants"):
 
     return data
 
-def fetch_opentable(lat, lng, radius_km):
-    print("fetching opentable")
-    return[]
+
+def fetch_opentable(lat,lng,radius_km,time: str = "19:00",party_size:int= 2):
+
+    if not settings.OPENTABLE_API_KEY:
+        return []
+
+    geohash = get_geohash(lat, lng)
+    date = get_next_available_date()
+    cache_key = f"opentable:{geohash}:{radius_km}:{date}:{time}:{party_size}"
+
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    city_cache_key = f"city:{geohash}"
+    city_name = cache.get(city_cache_key)
+
+    if not city_name:
+        city_name = reverse_geocode(lat, lng)
+        if city_name:
+            cache.set(city_cache_key, city_name, 600000)
+
+    if not city_name:
+        return []
+
+    url = "https://platform.opentable.com/restaurants/search"
+
+    headers = {
+        "Authorization": f"Bearer {settings.OPENTABLE_API_KEY}",
+        "Accept": "application/json",
+        "X-Platform-Version": "1.0"
+    }
+
+    params = {
+        "city": city_name,
+        "date": date,
+        "time": time,
+        "party_size": party_size,
+        "lat": lat,
+        "lng": lng,
+        "radius": radius_km,
+        "limit": 50
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+
+        restaurants = data.get("restaurants", data.get("data", []))
+        results = []
+
+        for restaurant in restaurants:
+            name = restaurant.get("name")
+            if not name:
+                continue
+
+
+            rest_lat = restaurant.get("latitude") or restaurant.get("lat")
+            rest_lng = restaurant.get("longitude") or restaurant.get("lng")
+
+
+            if rest_lat is None or rest_lng is None:
+                address = restaurant.get("address", {}).get("street_address", "")
+                if address:
+                    coords = geocode_address(address)
+                    if coords:
+                        rest_lat, rest_lng = coords
+                    else:
+                        continue
+                else:
+                    continue
+
+            distance = calculate_distance(lat, lng, rest_lat, rest_lng)
+
+
+            if distance > radius_km * 1000:
+                continue
+
+
+            rating = restaurant.get("rating")
+            try:
+                rating = float(rating) if rating else None
+            except (ValueError, TypeError):
+                rating = None
+
+            image_url = (
+                    restaurant.get("image_url") or
+                    restaurant.get("hero_image_url") or
+                    restaurant.get("photo_url") or
+                    restaurant.get("image"))
+
+            price = restaurant.get("price_range") or restaurant.get("price_level")
+            if isinstance(price, dict):
+                price = price.get("display")
+
+
+            address_obj = restaurant.get("address", {})
+            address_parts = [
+                address_obj.get("street_address", ""),
+                address_obj.get("locality", ""),
+                address_obj.get("region", ""),
+                address_obj.get("postal_code", "")
+            ]
+            display_address = ", ".join([p for p in address_parts if p])
+
+            result = {
+                "provider": "opentable",
+                "id": str(restaurant.get("id", restaurant.get("restaurant_id", name))),
+                "name": name,
+                "rating": rating,
+                "price": price,
+                "image_url": image_url,
+                "url": restaurant.get("url") or restaurant.get("reservation_url"),
+                "distance": int(distance),
+                "lat": rest_lat,
+                "lng": rest_lng,
+                "categories": restaurant.get("categories", ["restaurant"]),
+                "location": {
+                    "display_address": [display_address] if display_address else [restaurant.get("address_string", "")]
+                },
+                "availability": restaurant.get("is_bookable", True),
+                "cuisine": restaurant.get("cuisine_type") or restaurant.get("cuisine")
+            }
+
+            results.append(result)
+
+        cache.set(cache_key, results, settings.DISCOVERY_PROVIDER_CACHE_TTL_SECONDS)
+
+        return results
+
+    except requests.RequestException as e:
+        print(f"Request failed: {e}")
+        return []
 
 
 def fetch_tripadvisor(lat, lng, radius_km):
@@ -46,18 +180,18 @@ def fetch_tripadvisor(lat, lng, radius_km):
     if cached is not None:
         return cached
 
-    BASE_URL = "https://api.content.tripadvisor.com/api/v1/location/nearby_search"
+    base_url = "https://api.content.tripadvisor.com/api/v1/location/nearby_search"
 
     params = {
         "latLong": f"{lat},{lng}",
         "category": "restaurants",
         "radius": int(radius_km * 1000),
         "radiusUnit": "m",
-        "key": settings.TRIPADVISOR_API_KEY
+        "key": settings.TRIPADVISOR_API_KEY,
     }
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=5)
+        response = requests.get(base_url, params=params, timeout=5)
 
         if response.status_code != 200:
             return []
@@ -69,16 +203,19 @@ def fetch_tripadvisor(lat, lng, radius_km):
             location_id = item.get("location_id")
             name = item.get("name")
 
+            if not location_id or not name:
+                continue
+
             detail_url = f"https://api.content.tripadvisor.com/api/v1/location/{location_id}/details"
             detail_params = {"key": settings.TRIPADVISOR_API_KEY}
 
             try:
                 detail_response = requests.get(detail_url, params=detail_params, timeout=3)
+
                 if detail_response.status_code != 200:
                     continue
 
                 detail = detail_response.json()
-
 
                 item_lat = detail.get("latitude")
                 item_lng = detail.get("longitude")
@@ -86,41 +223,39 @@ def fetch_tripadvisor(lat, lng, radius_km):
                 if not item_lat or not item_lng:
                     continue
 
-
                 distance = calculate_distance(lat, lng, item_lat, item_lng)
 
                 if distance > radius_km * 1000:
                     continue
 
-
                 rating = detail.get("rating")
-                if rating:
-                    rating = float(rating)
+                rating = float(rating) if rating else None
 
                 price_level = detail.get("price_level")
-                price = None
-                if price_level:
-                    if isinstance(price_level, int):
-                        price = "$" * price_level
-                    else:
-                        price = str(price_level)
+                if isinstance(price_level, int):
+                    price = "$" * price_level
+                elif price_level:
+                    price = str(price_level)
+                else:
+                    price = None
 
-
-                image_url = None
                 photos = detail.get("photos", [])
+                image_url = None
                 if photos:
                     image_url = photos[0].get("images", {}).get("large", {}).get("url")
 
                 address_obj = detail.get("address", {})
                 display_address = []
+
                 if address_obj.get("address_string"):
-                    display_address.append(address_obj.get("address_string"))
-                elif address_obj.get("street1"):
-                    display_address.append(address_obj.get("street1"))
-                    if address_obj.get("locality"):
-                        display_address.append(address_obj.get("locality"))
-                    if address_obj.get("country"):
-                        display_address.append(address_obj.get("country"))
+                    display_address = [address_obj.get("address_string")]
+                else:
+                    parts = [
+                        address_obj.get("street1"),
+                        address_obj.get("locality"),
+                        address_obj.get("country"),
+                    ]
+                    display_address = [p for p in parts if p]
 
                 results.append({
                     "provider": "tripadvisor",
@@ -129,7 +264,10 @@ def fetch_tripadvisor(lat, lng, radius_km):
                     "rating": rating,
                     "price": price,
                     "image_url": image_url,
-                    "url": detail.get("web_url", f"https://www.tripadvisor.com/Restaurant_Review-g{location_id}"),
+                    "url": detail.get(
+                        "web_url",
+                        f"https://www.tripadvisor.com/Restaurant_Review-g{location_id}"
+                    ),
                     "distance": distance,
                     "lat": item_lat,
                     "lng": item_lng,
@@ -432,38 +570,127 @@ def fetch_partiful(lat, lng, radius_km): # no api available
     print("fetching partiful")
     return []
 
-def fetch_kayak(lat, lng, radius_km):# no public api info available
+def fetch_kayak(lat, lng, radius_km):
     print("fetching kayak")
-    return []
+
+    geohash = get_geohash(lat, lng)
+    destination= reverse_geocode(lat, lng)
+    if not destination:
+        return []
+    checkin=datetime.now().strftime("%Y-%m-%d")
+    checkout=(datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
+    rooms = "1|2"
+
+    cache_key = f"disc:provider:cache:kayak:{geohash}:{destination}:{checkin}:{checkout}:{radius_km}"
+
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    BASE_URL = "https://sandbox-en-us.kayakaffiliates.com/api/3.0/hotels"
+
+    user_track_id = str(uuid.uuid4())
+
+    params = {
+        "apiKey": settings.KAYAK_API_KEY,
+        "userTrackId": user_track_id,
+        "destination": destination,
+        "checkin": checkin,
+        "checkout": checkout,
+        "rooms": rooms,
+        "pageSize": 50,
+        "pageIndex": 0,
+        "summaryOnly": False,
+    }
+
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=10)
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+
+        results = []
+
+        for hotel in data.get("results", []):
+            name = hotel.get("name")
+            if not name:
+                continue
+
+            lat_h = hotel.get("latitude")
+            lng_h = hotel.get("longitude")
+
+            if lat_h is None or lng_h is None:
+                continue
+
+            distance = calculate_distance(lat, lng, lat_h, lng_h)
+
+            if distance > radius_km * 1000:
+                continue
+
+            image = None
+            images = hotel.get("images", [])
+            if images:
+                image = images[0].get("large") or images[0].get("small")
+
+            rating = hotel.get("guestRating")
+
+            price = hotel.get("lowestRate")
+
+            results.append({
+                "provider": "kayak",
+                "id": str(hotel.get("id")),
+                "name": name,
+                "rating": rating,
+                "price": price,
+                "image_url": image,
+                "url": hotel.get("href"),
+                "distance": int(distance),
+                "lat": lat_h,
+                "lng": lng_h,
+                "categories": ["hotel"],
+                "location": {
+                    "display_address": [
+                        hotel.get("address", "")
+                    ]
+                }
+            })
+
+        cache.set(cache_key, results, timeout=settings.DISCOVERY_PROVIDER_CACHE_TTL_SECONDS)
+        return results
+
+    except requests.RequestException as e:
+        print(f"Kayak request failed: {e}")
+        return []
 
 def build_provider_tasks(category, lat, lng, radius_km):
     providers = get_providers(category)
-
     tasks = []
 
     if "yelp" in providers:
-        tasks.append(lambda: fetch_yelp(lat,lng,radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_yelp(l, n, r))
 
     if "tripadvisor" in providers:
-        tasks.append(lambda: fetch_tripadvisor(lat, lng, radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_tripadvisor(l, n, r))
 
     if "opentable" in providers:
-        tasks.append(lambda: fetch_opentable(lat, lng, radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_opentable(l, n, r))
 
     if "eventbrite" in providers:
-        tasks.append(lambda: fetch_eventbrite(lat, lng, radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_eventbrite(l, n, r))
 
     if "viator" in providers:
-        tasks.append(lambda: fetch_viator(lat, lng, radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_viator(l, n, r))
 
     if "luma" in providers:
-        tasks.append(lambda: fetch_luma(lat, lng, radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_luma(l, n, r))
 
     if "partiful" in providers:
-        tasks.append(lambda: fetch_partiful(lat, lng, radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_partiful(l, n, r))
 
     if "kayak" in providers:
-        tasks.append(lambda: fetch_kayak(lat, lng, radius_km))
+        tasks.append(lambda l=lat, n=lng, r=radius_km: fetch_kayak(l, n, r))
 
     return tasks
 
